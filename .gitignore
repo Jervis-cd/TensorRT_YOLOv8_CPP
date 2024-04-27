@@ -6,6 +6,9 @@
 *.lo
 *.o
 *.obj
+*.engine
+.vscode
+objs
 
 # Precompiled Headers
 *.gch
