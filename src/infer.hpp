@@ -35,9 +35,7 @@ class Infer{
 };
 
 std::shared_ptr<Infer> load(const std::string &file);
-
 std::string format_shape(const std::vector<int> &shape);
-
 } // namespace trt
 
 #endif // __INFER_HPP__
