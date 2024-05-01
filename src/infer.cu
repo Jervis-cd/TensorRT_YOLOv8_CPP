@@ -48,15 +48,15 @@ namespace trt{
 
 
 class __nativate_nvinfer_logger:public nvinfer1::ILogger{
-public:
-virtual void log(Severity severity,const char *msg) noexcept override{
-  if (severity == Severity::kINTERNAL_ERROR) {
-    INFO("NVInfer INTERNAL_ERROR: %s",msg);
-    abort();
-  } else if (severity == Severity::kERROR) {
-    INFO("NVInfer: %s",msg);
+ public:
+  virtual void log(Severity severity,const char *msg) noexcept override{
+    if (severity==Severity::kINTERNAL_ERROR) {
+      INFO("NVInfer INTERNAL_ERROR: %s",msg);
+      abort();
+    } else if (severity==Severity::kERROR) {
+      INFO("NVInfer: %s",msg);
+    }
   }
-}
 };
 
 static __nativate_nvinfer_logger gLogger;

@@ -20,6 +20,12 @@ class InferImpl:public Infer{
     int num_image=images.size();
     if(num_image==0) return {};
     auto input_dims=trt_->static_dims(0);
+    int infer_batch_size=input_dims[0];
+    if(infer_batch_size!=num_image){
+      if(isdyna)
+    }
+
+    return 
   }
 };
 
