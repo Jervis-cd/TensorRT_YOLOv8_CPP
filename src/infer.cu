@@ -37,7 +37,7 @@ namespace trt{
     }                              \
   }while(0)
 
-#define Assertf(op,...)                             \
+#define Assertf(op,...)                              \
   do{                                                \
     bool cond=!(!(op));                              \
     if(!cond){                                       \
