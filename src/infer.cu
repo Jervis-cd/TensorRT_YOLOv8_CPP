@@ -144,7 +144,7 @@ class InferImpl:public Infer{
     return true;
   }
 
-  bool load(const std::string &file){
+  bool load(const std::string &file,float confidence_threshold,float nms_threshold){
     auto data=load_file(file);
     if(data.empty()){
       INFO("An empty file has been loaded. Please confirm your file path: %s",file.c_str());
@@ -176,6 +176,19 @@ class InferImpl:public Infer{
     return std::vector<int>(dim.d,dim.d+dim.nbDims);
   }
  };
+
+Infer *loadraw(const std::string &engine_file,float confidence_threshold,float nms_threshold){
+  InferImpl *impl = new InferImpl();
+  if (!impl->load(engine_file,confidence_threshold,nms_threshold)){
+    delete impl;
+    impl = nullptr;
+  }
+  return impl;
+}
+
+std::shared_ptr<Infer> load(const std::string &engine_file,float confidence_threshold,float nms_threshold) {
+  return std::shared_ptr<InferImpl>((InferImpl *)loadraw(engine_file,confidence_threshold,nms_threshold));
+}
 
 
 } // namespace trt
