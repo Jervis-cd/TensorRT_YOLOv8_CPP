@@ -322,7 +322,6 @@ class InferImpl:public Infer{
   std::vector<std::shared_ptr<trt::Memory<unsigned char>>> preprocess_buffers_;
 
   trt::Memory<float> input_buffer_,bbox_predict_,output_boxarray_;
-
   int network_input_width_,network_input_height_;
 
   Norm normalize_;
@@ -330,7 +329,7 @@ class InferImpl:public Infer{
   int num_classes_=0;
   bool isdynamic_model_=false;
 
-  virtual ~InferImpl() = default;
+  virtual ~InferImpl()=default;
 
   void adjust_memory(int batch_size){
     size_t input_numel=network_input_width_*network_input_height_*3;
@@ -447,14 +446,41 @@ class InferImpl:public Infer{
     for(int ib=0;ib<num_image;++ib){
       float *boxarray_device=output_boxarray_.gpu()+ib*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT);
       float* affine_matrix_device=(float *)preprocess_buffers_[ib]->gpu();
+
+      float *image_based_bbox_output=bbox_output_device+ib*(bbox_head_dims_[1]*bbox_head_dims_[2]);
+      checkRuntime(cudaMemsetAsync(boxarray_device,0,sizeof(int),stream_));
+      decode_kernel_invoker(image_based_bbox_output,bbox_head_dims_[1],num_classes_,
+                            bbox_head_dims_[2],confidence_threshold_,nms_threshold_,
+                            affine_matrix_device,boxarray_device,MAX_IMAGE_BOXES,stream_);
     }
 
-    return 
+    checkRuntime(cudaMemcpyAsync(output_boxarray_.cpu(),output_boxarray_.gpu(),
+                                 output_boxarray_.gpu_bytes(),cudaMemcpyDeviceToHost,stream_));
+    checkRuntime(cudaStreamSynchronize(stream_));
+
+    std::vector<BoxArray> arrout(num_image);
+    int imemory=0;
+    for (int ib=0;ib<num_image;++ib){
+      float *parray = output_boxarray_.cpu() + ib * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT);
+      int count = min(MAX_IMAGE_BOXES, (int)*parray);
+      BoxArray &output = arrout[ib];
+      output.reserve(count);
+      for(int i = 0; i < count; ++i){
+        float *pbox = parray + 1 + i * NUM_BOX_ELEMENT;
+        int label = pbox[5];
+        int keepflag = pbox[6];
+        if (keepflag == 1) {
+          Box result_object_box(pbox[0], pbox[1], pbox[2], pbox[3], pbox[4], label);
+          output.emplace_back(result_object_box);
+        }
+      }
+    }
+    return arrout; 
   }
 };
 
 Infer *loadraw(const std::string &engine_file,float confidence_threshold,float nms_threshold){
-  InferImpl *impl = new InferImpl();
+  InferImpl *impl=new InferImpl();
   if (!impl->load(engine_file,confidence_threshold, nms_threshold)) {
     delete impl;
     impl = nullptr;

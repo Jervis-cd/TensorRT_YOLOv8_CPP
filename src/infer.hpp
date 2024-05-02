@@ -60,6 +60,7 @@ class Memory:public BaseMemory{
  public:
   Memory()=default;
   Memory(const Memory &other)=delete;                   // 删除参数构造函数
+  
   Memory &operator=(const Memory &other)=delete;        // 删除拷贝构造函数
   virtual _DT *gpu(size_t size){return (_DT *)BaseMemory::gpu_realloc(size *sizeof(_DT));}
   virtual _DT *cpu(size_t size){return (_DT *)BaseMemory::cpu_realloc(size *sizeof(_DT));}
