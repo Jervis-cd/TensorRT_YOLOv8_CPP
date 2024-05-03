@@ -116,6 +116,7 @@ float Timer::stop(const char *prefix,bool print){
 }
 
 BaseMemory::BaseMemory(void *cpu,size_t cpu_bytes,void *gpu,size_t gpu_bytes){
+  // 构造函数指定cpu/gpu的指针以及容量
   reference(cpu,cpu_bytes,gpu,gpu_bytes);
 }
 
@@ -143,7 +144,7 @@ void BaseMemory::reference(void *cpu,size_t cpu_bytes,void *gpu,size_t gpu_bytes
   this->owner_gpu_=!(gpu && gpu_bytes>0);
 }
 
-BaseMemory::~BaseMemory(){release();}
+BaseMemory::~BaseMemory(){release();}       // 析构时释放cpu/gpu指向的内存
 
 void *BaseMemory::gpu_realloc(size_t bytes){
   if(gpu_capacity_<bytes){
@@ -201,22 +202,22 @@ class __nativate_nvinfer_logger:public nvinfer1::ILogger{
   virtual void log(Severity severity,const char *msg) noexcept override{
     if (severity==Severity::kINTERNAL_ERROR) {
       INFO("NVInfer INTERNAL_ERROR: %s",msg);
-      abort();
+      abort();          // 发生终止错误时，直接终止程序
     } else if (severity==Severity::kERROR) {
       INFO("NVInfer: %s",msg);
     }
   }
 };
 
+// 定义日志管理器
 static __nativate_nvinfer_logger gLogger;
 
-// nvdia指针释放器，用于使用智能指针时，自定义deletor
+// nvidia指针释放器，用于使用智能指针时，自定义deletor
 template<typename _T>
 static void destroy_nvidia_pointer(_T *ptr){
   if(ptr) ptr->destroy();
 }
 
-// 打开engine中存储数据
 static std::vector<uint8_t> load_file(const std::string &file){
   std::ifstream in(file,std::ios::in | std::ios::binary);
   if(!in.is_open()) return {};
@@ -313,7 +314,7 @@ class InferImpl:public Infer{
   }
 
   // TensorRT框架执行推理
-  virtual bool forward(const std::vector<void *> &bindings,void *stream,void *input_consum_event) override{
+  virtual bool forward(const std::vector<void *> &bindings,void *stream,void *input_consum_event) override {
     return this->context_->context_->enqueueV2((void**)bindings.data(),
                                                (cudaStream_t)stream,
                                                (cudaEvent_t *)input_consum_event);
@@ -338,10 +339,10 @@ class InferImpl:public Infer{
   }
 
   // 获取输入输出的数量
-  virtual int num_bindings() override{return this->context_->engine_->getNbBindings();}
+  virtual int num_bindings() override {return this->context_->engine_->getNbBindings();}
 
   // 用于判断是否是输入index
-  virtual bool is_input(int ibinding) override{
+  virtual bool is_input(int ibinding) override {
     return this->context_->engine_->bindingIsInput(ibinding);
   }
 
@@ -387,7 +388,7 @@ class InferImpl:public Infer{
     return false;
   }
 
-    virtual void print() override{
+  virtual void print() override{
     INFO("Infer %p [%s]",this,has_dynamic_dim()?"DynamicShape":"StaticShape");
 
     int num_input=0;

@@ -1,198 +1,264 @@
 #include "infer.hpp"
 #include "yolo.hpp"
 
-#include<NvInfer.h>
+namespace yolo {
 
-namespace yolo{
+using namespace std;
 
 #define GPU_BLOCK_THREADS 512
 
+// runtime API检查
 #define checkRuntime(call)                                                                 \
-  do{                                                                                      \
-    auto ___call__ret_code__=(call);                                                       \
-    if(___call__ret_code__!=cudaSuccess){                                                  \
-      INFO("CUDA Runtime error %s # %s, code = %s [ %d ]",#call,                           \
-           cudaGetErrorString(___call__ret_code__),cudaGetErrorName(___call__ret_code__),  \
+  do {                                                                                     \
+    auto ___call__ret_code__ = (call);                                                     \
+    if (___call__ret_code__ != cudaSuccess) {                                              \
+      INFO("CUDA Runtime error💥 %s # %s, code = %s [ %d ]", #call,                         \
+           cudaGetErrorString(___call__ret_code__), cudaGetErrorName(___call__ret_code__), \
            ___call__ret_code__);                                                           \
       abort();                                                                             \
     }                                                                                      \
-  }while(0)
+  } while (0)
 
+// 核函数检查
 #define checkKernel(...)                 \
-  do{                                    \
-    {(__VA_ARGS__);}                     \
+  do {                                   \
+    { (__VA_ARGS__); }                   \
     checkRuntime(cudaPeekAtLastError()); \
-  }while(0)
+  } while (0)
 
-enum class NormType:int{None=0,MeanStd=1,AlphaBeta=2};
+// 归一化参数
+enum class NormType : int { None = 0, MeanStd = 1, AlphaBeta = 2 };
 
-enum class ChannelType:int{None=0,SwapRB=1};
+// 是否bgr->rgb
+enum class ChannelType : int { None = 0, SwapRB = 1 };
 
-struct Norm{
+/* 归一化操作，可以支持均值标准差，alpha beta，和swap RB */
+struct Norm {
   float mean[3];
   float std[3];
-  float alpha,beta;
-  NormType type=NormType::None;
-  ChannelType channel_type=ChannelType::None;
+  float alpha, beta;
+  NormType type = NormType::None;
+  ChannelType channel_type = ChannelType::None;
 
-  static Norm mean_std(const float mean[3],const float std[3],float alpha=1/255.0f,
-                      ChannelType channel_type=ChannelType::None);
+  // 静态函数，类内声明类外定义
+  // out = (x * alpha - mean) / std
+  static Norm mean_std(const float mean[3], const float std[3], float alpha = 1 / 255.0f,
+                       ChannelType channel_type = ChannelType::None);
 
-  static Norm alpha_beta(float alpha,float beta=0,ChannelType channel_type=ChannelType::None);
+  // out = x * alpha + beta
+  static Norm alpha_beta(float alpha, float beta = 0, ChannelType channel_type = ChannelType::None);
 
+  // None
   static Norm None();
 };
 
-Norm Norm::mean_std(const float mean[3],const float std[3],float alpha,ChannelType channel_type){
+Norm Norm::mean_std(const float mean[3], const float std[3], float alpha,
+                    ChannelType channel_type) {
   Norm out;
-  out.type=NormType::MeanStd;
-  out.alpha=alpha;
-  out.channel_type=channel_type;
-  memcpy(out.mean,mean,sizeof(out.mean));
-  memcpy(out.std,std,sizeof(out.std));
+  out.type = NormType::MeanStd;
+  out.alpha = alpha;
+  out.channel_type = channel_type;
+  memcpy(out.mean, mean, sizeof(out.mean));
+  memcpy(out.std, std, sizeof(out.std));
   return out;
 }
 
-Norm Norm::None(){return Norm();}
-
-Norm Norm::alpha_beta(float alpha,float beta,ChannelType channel_type){
+Norm Norm::alpha_beta(float alpha, float beta, ChannelType channel_type) {
   Norm out;
-  out.type=NormType::AlphaBeta;
-  out.alpha=alpha;
-  out.beta=beta;
-  out.channel_type=channel_type;
+  out.type = NormType::AlphaBeta;
+  out.alpha = alpha;
+  out.beta = beta;
+  out.channel_type = channel_type;
   return out;
 }
 
-const int NUM_BOX_ELEMENT=8;              // 每个box存储的元素数量
-const int MAX_IMAGE_BOXES=1024;
+Norm Norm::None() { return Norm(); }
 
-// 找到一个数可以整除align，这个数满足大于等于并最接近n
-inline int upbound(int n,int align=32){return (n+align-1)/align*align;}
+const int NUM_BOX_ELEMENT = 8;  // left, top, right, bottom, confidence, class,
+                                // keepflag, row_index(output)
+const int MAX_IMAGE_BOXES = 1024;
 
-static __host__ __device__ void affine_project(float *matrix,float x,float y,float *ox,float *oy){
-  *ox=matrix[0]*x+matrix[1]*y+matrix[2];
-  *oy=matrix[3]*x+matrix[4]*y+matrix[5];
+// 内联函数
+inline int upbound(int n, int align = 32) { return (n + align - 1) / align * align; }
+
+// 仿射变换主机函数和设备函数（单一设备函数只能被核函数和其他设备函数调用）
+static __host__ __device__ void affine_project(float *matrix, float x, float y, float *ox,
+                                               float *oy) {
+  *ox = matrix[0] * x + matrix[1] * y + matrix[2];
+  *oy = matrix[3] * x + matrix[4] * y + matrix[5];
 }
 
-static __global__ void decode_kernel_v8(float *predict,int num_bboxes,int num_classes,
-                                        int output_cdim,float confidence_threshold,
-                                        float *invert_affine_matrix,float *parray,
-                                        int MAX_IMAGE_BOXES){
-  int position=blockDim.x*blockIdx.x+threadIdx.x;     // 当前线程的序号
-  if(position>=num_bboxes) return;
+// 核函数（由主机函数调用，在设备中执行）
+static __global__ void decode_kernel_common(float *predict, int num_bboxes, int num_classes,
+                                            int output_cdim, float confidence_threshold,
+                                            float *invert_affine_matrix, float *parray,
+                                            int MAX_IMAGE_BOXES) {
+  int position = blockDim.x * blockIdx.x + threadIdx.x;
+  if (position >= num_bboxes) return;
 
-  float *pitem=predict+output_cdim*position;
-  float *class_confidence=pitem+4;
-  float confidence=*class_confidence++;
-  int label=0;
-  for(int i=1;i<num_classes;++i,++class_confidence){
-    if(*class_confidence>confidence){
-      confidence=*class_confidence;
-      label=i;
+  float *pitem = predict + output_cdim * position;
+  float objectness = pitem[4];
+  if (objectness < confidence_threshold) return;
+
+  float *class_confidence = pitem + 5;
+  float confidence = *class_confidence++;
+  int label = 0;
+  for (int i = 1; i < num_classes; ++i, ++class_confidence) {
+    if (*class_confidence > confidence) {
+      confidence = *class_confidence;
+      label = i;
     }
   }
 
-  if(confidence<confidence_threshold) return;
+  confidence *= objectness;
+  if (confidence < confidence_threshold) return;
 
-  int index=atomicAdd(parray,1);
-  if(index>=MAX_IMAGE_BOXES) return;
+  int index = atomicAdd(parray, 1);
+  if (index >= MAX_IMAGE_BOXES) return;
 
-  float cx=*pitem++;
-  float cy=*pitem++;
-  float width=*pitem++;
-  float height=*pitem++;
-  float left=cx-width*0.5f;
-  float top=cy-height*0.5f;
-  float right=cx+width*0.5f;
-  float bottom=cy+height*0.5f;
+  float cx = *pitem++;
+  float cy = *pitem++;
+  float width = *pitem++;
+  float height = *pitem++;
+  float left = cx - width * 0.5f;
+  float top = cy - height * 0.5f;
+  float right = cx + width * 0.5f;
+  float bottom = cy + height * 0.5f;
+  affine_project(invert_affine_matrix, left, top, &left, &top);
+  affine_project(invert_affine_matrix, right, bottom, &right, &bottom);
 
-  affine_project(invert_affine_matrix,left,top,&left,&top);
-  affine_project(invert_affine_matrix,right,bottom,&right,&bottom);
-
-  float *pout_item=parray+1+index*NUM_BOX_ELEMENT;
-  *pout_item++=left;
-  *pout_item++=top;
-  *pout_item++=right;
-  *pout_item++=bottom;
-  *pout_item++=confidence;
-  *pout_item++=label;
-  *pout_item++=1;
-  *pout_item++=position;
+  float *pout_item = parray + 1 + index * NUM_BOX_ELEMENT;
+  *pout_item++ = left;
+  *pout_item++ = top;
+  *pout_item++ = right;
+  *pout_item++ = bottom;
+  *pout_item++ = confidence;
+  *pout_item++ = label;
+  *pout_item++ = 1;  // 1 = keep, 0 = ignore
 }
 
-static __device__ float box_iou(float aleft,float atop,float aright,float abottom,float bleft,
-                                float btop,float bright,float bbottom){
-  float cleft=max(aleft,bleft);
-  float ctop=max(atop,btop);
-  float cright=min(aright,bright);
-  float cbottom=min(abottom,bbottom);
+// 核函数解析网络v8 predict结果
+static __global__ void decode_kernel_v8(float *predict, int num_bboxes, int num_classes,
+                                        int output_cdim, float confidence_threshold,
+                                        float *invert_affine_matrix, float *parray,
+                                        int MAX_IMAGE_BOXES) {
+  int position = blockDim.x * blockIdx.x + threadIdx.x;
+  if (position >= num_bboxes) return;
 
-  float c_area=max(cright-cleft, 0.0f)*max(cbottom-ctop,0.0f);
-  if(c_area==0.0f) return 0.0f;
+  float *pitem = predict + output_cdim * position;
+  float *class_confidence = pitem + 4;
+  float confidence = *class_confidence++;
+  int label = 0;
+  for (int i = 1; i < num_classes; ++i, ++class_confidence) {
+    if (*class_confidence > confidence) {
+      confidence = *class_confidence;
+      label = i;
+    }
+  }
+  if (confidence < confidence_threshold) return;
 
-  float a_area=max(0.0f,aright-aleft)*max(0.0f,abottom-atop);
-  float b_area = max(0.0f,bright-bleft)*max(0.0f,bbottom-btop);
-  return c_area/(a_area+b_area-c_area);
+  int index = atomicAdd(parray, 1);
+  if (index >= MAX_IMAGE_BOXES) return;
+
+  float cx = *pitem++;
+  float cy = *pitem++;
+  float width = *pitem++;
+  float height = *pitem++;
+  float left = cx - width * 0.5f;
+  float top = cy - height * 0.5f;
+  float right = cx + width * 0.5f;
+  float bottom = cy + height * 0.5f;
+  affine_project(invert_affine_matrix, left, top, &left, &top);
+  affine_project(invert_affine_matrix, right, bottom, &right, &bottom);
+
+  float *pout_item = parray + 1 + index * NUM_BOX_ELEMENT;
+  *pout_item++ = left;
+  *pout_item++ = top;
+  *pout_item++ = right;
+  *pout_item++ = bottom;
+  *pout_item++ = confidence;
+  *pout_item++ = label;
+  *pout_item++ = 1;  // 1 = keep, 0 = ignore
+  *pout_item++ = position;
 }
 
-static __global__ void fast_nms_kernel(float *bboxes,int MAX_IMAG_BOXES,float threshold){
-  int position=(blockDim.x*blockIdx.x+threadIdx.x);
-  int count=min((int)*bboxes,MAX_IMAG_BOXES);
-  if(position>=count) return;
+// 设备函数（在设备上执行，由核函数或其他设备函数调用），计算IOU
+static __device__ float box_iou(float aleft, float atop, float aright, float abottom, float bleft,
+                                float btop, float bright, float bbottom) {
+  float cleft = max(aleft, bleft);
+  float ctop = max(atop, btop);
+  float cright = min(aright, bright);
+  float cbottom = min(abottom, bbottom);
 
-  float *pcurrent=bboxes+1+position*NUM_BOX_ELEMENT;
-  for(int i=0;i<count;++i){
-    float *pitem=bboxes+1+i*NUM_BOX_ELEMENT;
-    if(i==position || pcurrent[5]!=pitem[5]) continue;
+  float c_area = max(cright - cleft, 0.0f) * max(cbottom - ctop, 0.0f);
+  if (c_area == 0.0f) return 0.0f;
 
-    if(pitem[4]>=pcurrent[4]){
-      if(pitem[4]==pcurrent[4] && i<position) continue;
+  float a_area = max(0.0f, aright - aleft) * max(0.0f, abottom - atop);
+  float b_area = max(0.0f, bright - bleft) * max(0.0f, bbottom - btop);
+  return c_area / (a_area + b_area - c_area);
+}
 
-      float iou=box_iou(pcurrent[0],pcurrent[1],pcurrent[2],pcurrent[3],
-                        pitem[0],pitem[1],pitem[2],pitem[3]);
+// 核函数，实现快速nms
+static __global__ void fast_nms_kernel(float *bboxes, int MAX_IMAGE_BOXES, float threshold) {
+  int position = (blockDim.x * blockIdx.x + threadIdx.x);
+  int count = min((int)*bboxes, MAX_IMAGE_BOXES);
+  if (position >= count) return;
 
-      if(iou>threshold){
-        pcurrent[6]=0;
+  // left, top, right, bottom, confidence, class, keepflag
+  float *pcurrent = bboxes + 1 + position * NUM_BOX_ELEMENT;
+  for (int i = 0; i < count; ++i) {
+    float *pitem = bboxes + 1 + i * NUM_BOX_ELEMENT;
+    if (i == position || pcurrent[5] != pitem[5]) continue;
+
+    if (pitem[4] >= pcurrent[4]) {
+      if (pitem[4] == pcurrent[4] && i < position) continue;
+
+      float iou = box_iou(pcurrent[0], pcurrent[1], pcurrent[2], pcurrent[3], pitem[0], pitem[1],
+                          pitem[2], pitem[3]);
+      if (iou > threshold) {
+        pcurrent[6] = 0;  // 1=keep, 0=ignore
         return;
       }
     }
   }
 }
 
-static dim3 grid_dims(int numJobs){
-  int numBlockTreads=numJobs<GPU_BLOCK_THREADS?numJobs:GPU_BLOCK_THREADS;
-  return dim3(((numJobs+numBlockTreads-1)/(float)numBlockTreads));
+// 获取grid维度
+static dim3 grid_dims(int numJobs) {
+  int numBlockThreads = numJobs < GPU_BLOCK_THREADS ? numJobs : GPU_BLOCK_THREADS;
+  return dim3(((numJobs + numBlockThreads - 1) / (float)numBlockThreads));
 }
 
-static dim3 block_dims(int numJobs){
-  return numJobs<GPU_BLOCK_THREADS?numJobs:GPU_BLOCK_THREADS;
+// 获取block维度
+static dim3 block_dims(int numJobs) {
+  return numJobs < GPU_BLOCK_THREADS ? numJobs : GPU_BLOCK_THREADS;
 }
 
-static void decode_kernel_invoker(float *predict,int num_bboxes,int num_classes,int output_cdim,
-                                  float confidence_threshold,float mns_threshold,
-                                  float *invert_affine_matrix,float *parray,int MAX_IMAGE_BOXES,
-                                  cudaStream_t stream){
-  auto grid=grid_dims(num_bboxes);
-  auto block=block_dims(num_bboxes);
+// 网络输出decode调用程序
+static void decode_kernel_invoker(float *predict, int num_bboxes, int num_classes, int output_cdim,
+                                  float confidence_threshold, float nms_threshold,
+                                  float *invert_affine_matrix, float *parray, int MAX_IMAGE_BOXES,
+                                  cudaStream_t stream) {
+  auto grid = grid_dims(num_bboxes);
+  auto block = block_dims(num_bboxes);
 
+  
   checkKernel(decode_kernel_v8<<<grid, block, 0, stream>>>(
-        predict,num_bboxes,num_classes,output_cdim,confidence_threshold,
-        invert_affine_matrix,parray,MAX_IMAGE_BOXES));
-
-  grid=grid_dims(MAX_IMAGE_BOXES);
-  block=block_dims(MAX_IMAGE_BOXES);
-  checkKernel(fast_nms_kernel<<<grid,block,0,stream>>>(parray,MAX_IMAGE_BOXES,mns_threshold));
+        predict, num_bboxes, num_classes, output_cdim, confidence_threshold, invert_affine_matrix,
+        parray, MAX_IMAGE_BOXES));
+  
+  grid = grid_dims(MAX_IMAGE_BOXES);
+  block = block_dims(MAX_IMAGE_BOXES);
+  checkKernel(fast_nms_kernel<<<grid, block, 0, stream>>>(parray, MAX_IMAGE_BOXES, nms_threshold));
 }
 
-static __global__ void warp_affine_bilinear_and_normalize_plane_kernel(uint8_t *src,int src_line_size,
-                                                                      int src_width,int src_height,
-                                                                      float *dst,int dst_width,int dst_height,
-                                                                      uint8_t const_value_st,float *warp_affine_matrix_2_3,
-                                                                      Norm norm){
-  int dx=blockDim.x*blockIdx.x+threadIdx.x;
-  int dy=blockDim.y*blockIdx.y+threadIdx.y;
-  if(dx>dst_width || dy>dst_height) return;
+// 核函数
+static __global__ void warp_affine_bilinear_and_normalize_plane_kernel(
+    uint8_t *src, int src_line_size, int src_width, int src_height, float *dst, int dst_width,
+    int dst_height, uint8_t const_value_st, float *warp_affine_matrix_2_3, Norm norm) {
+  int dx = blockDim.x * blockIdx.x + threadIdx.x;
+  int dy = blockDim.y * blockIdx.y + threadIdx.y;
+  if (dx >= dst_width || dy >= dst_height) return;
 
   float m_x1 = warp_affine_matrix_2_3[0];
   float m_y1 = warp_affine_matrix_2_3[1];
@@ -269,6 +335,7 @@ static __global__ void warp_affine_bilinear_and_normalize_plane_kernel(uint8_t *
   *pdst_c2 = c2;
 }
 
+// 主机函数调用核函数
 static void warp_affine_bilinear_and_normalize_plane(uint8_t *src, int src_line_size, int src_width,
                                                      int src_height, float *dst, int dst_width,
                                                      int dst_height, float *matrix_2_3,
@@ -282,189 +349,265 @@ static void warp_affine_bilinear_and_normalize_plane(uint8_t *src, int src_line_
       matrix_2_3, norm));
 }
 
+static __global__ void decode_single_mask_kernel(int left, int top, float *mask_weights,
+                                                 float *mask_predict, int mask_width,
+                                                 int mask_height, unsigned char *mask_out,
+                                                 int mask_dim, int out_width, int out_height) {
+  // mask_predict to mask_out
+  // mask_weights @ mask_predict
+  int dx = blockDim.x * blockIdx.x + threadIdx.x;
+  int dy = blockDim.y * blockIdx.y + threadIdx.y;
+  if (dx >= out_width || dy >= out_height) return;
+
+  int sx = left + dx;
+  int sy = top + dy;
+  if (sx < 0 || sx >= mask_width || sy < 0 || sy >= mask_height) {
+    mask_out[dy * out_width + dx] = 0;
+    return;
+  }
+
+  float cumprod = 0;
+  for (int ic = 0; ic < mask_dim; ++ic) {
+    float cval = mask_predict[(ic * mask_height + sy) * mask_width + sx];
+    float wval = mask_weights[ic];
+    cumprod += cval * wval;
+  }
+
+  float alpha = 1.0f / (1.0f + exp(-cumprod));
+  mask_out[dy * out_width + dx] = alpha * 255;
+}
+
+static void decode_single_mask(float left, float top, float *mask_weights, float *mask_predict,
+                               int mask_width, int mask_height, unsigned char *mask_out,
+                               int mask_dim, int out_width, int out_height, cudaStream_t stream) {
+  // mask_weights is mask_dim(32 element) gpu pointer
+  dim3 grid((out_width + 31) / 32, (out_height + 31) / 32);
+  dim3 block(32, 32);
+
+  checkKernel(decode_single_mask_kernel<<<grid, block, 0, stream>>>(
+      left, top, mask_weights, mask_predict, mask_width, mask_height, mask_out, mask_dim, out_width,
+      out_height));
+}
+
+// 构建仿射矩阵
 struct AffineMatrix {
-  float i2d[6];
-  float d2i[6];
+  float i2d[6];  // image to dst(network), 2x3 matrix
+  float d2i[6];  // dst to image, 2x3 matrix
 
-  void compute(const std::tuple<int, int> &from, const std::tuple<int, int> &to){
-    float scale_x=std::get<0>(to)/(float)std::get<0>(from);
-    float scale_y=std::get<1>(to)/(float)std::get<1>(from);
-    float scale=std::min(scale_x, scale_y);
+  // 根据输入图像和网络输入计算仿射变换矩阵
+  void compute(const std::tuple<int, int> &from, const std::tuple<int, int> &to) {
+    // 获取x，y的缩放比例
+    float scale_x = get<0>(to) / (float)get<0>(from);         // 从tuple中获取数据
+    float scale_y = get<1>(to) / (float)get<1>(from);
+    float scale = std::min(scale_x, scale_y);
 
-    i2d[0]=scale;
-    i2d[1]=0;
-    i2d[2]=-scale*std::get<0>(from)*0.5+std::get<0>(to)*0.5+scale*0.5-0.5;
-    i2d[3]=0;
-    i2d[4]=scale;
-    i2d[5]=-scale*std::get<1>(from)*0.5+std::get<1>(to)*0.5+scale*0.5-0.5;
+    i2d[0] = scale;
+    i2d[1] = 0;
+    i2d[2] = -scale * get<0>(from) * 0.5 + get<0>(to) * 0.5 + scale * 0.5 - 0.5;
+    i2d[3] = 0;
+    i2d[4] = scale;
+    i2d[5] = -scale * get<1>(from) * 0.5 + get<1>(to) * 0.5 + scale * 0.5 - 0.5;
 
-    double D=i2d[0]*i2d[4]-i2d[1]*i2d[3];
-    D=D!=0. ? double(1.)/D : double(0.);
-    double A11=i2d[4]*D,A22=i2d[0]*D,A12=-i2d[1]*D,A21=-i2d[3]*D;
-    double b1=-A11*i2d[2]-A12*i2d[5];
-    double b2=-A21*i2d[2]-A22*i2d[5];
+    // 求解逆矩阵
+    double D = i2d[0] * i2d[4] - i2d[1] * i2d[3];
+    D = D != 0. ? double(1.) / D : double(0.);
+    double A11 = i2d[4] * D, A22 = i2d[0] * D, A12 = -i2d[1] * D, A21 = -i2d[3] * D;
+    double b1 = -A11 * i2d[2] - A12 * i2d[5];
+    double b2 = -A21 * i2d[2] - A22 * i2d[5];
 
-    d2i[0]=A11;
-    d2i[1]=A12;
-    d2i[2]=b1;
-    d2i[3]=A21;
-    d2i[4]=A22;
-    d2i[5]=b2;
+    d2i[0] = A11;
+    d2i[1] = A12;
+    d2i[2] = b1;
+    d2i[3] = A21;
+    d2i[4] = A22;
+    d2i[5] = b2;
   }
 };
 
+
+// yolo中的infer，区别于命名空间trt中的infer，命名空间yolo中infer会调用trt中的infer
 class InferImpl:public Infer{
- public:
-  std::shared_ptr<trt::Infer> trt_;
-  std::string engine_file_;
-  float confidence_threshold_;
-  float nms_threshold_;
-  std::vector<std::shared_ptr<trt::Memory<unsigned char>>> preprocess_buffers_;
+public:
+  shared_ptr<trt::Infer> trt_;          // 创建trt::Infer对象
+  string engine_file_;                  // 模型序列化文件地址
+  float confidence_threshold_;          // 置信度阈值
+  float nms_threshold_;                 // nms阈值
+  vector<shared_ptr<trt::Memory<unsigned char>>> preprocess_buffers_;     // 创建预处理需要的buffer
 
-  trt::Memory<float> input_buffer_,bbox_predict_,output_boxarray_;
-  int network_input_width_,network_input_height_;
-
+  trt::Memory<float> input_buffer_, bbox_predict_, output_boxarray_;
+  trt::Memory<float> segment_predict_;
+  // 获取网络的输入w，h
+  int network_input_width_, network_input_height_;
+  // 归一化类型
   Norm normalize_;
-  std::vector<int> bbox_head_dims_;
-  int num_classes_=0;
-  bool isdynamic_model_=false;
+  vector<int> bbox_head_dims_;                      // 网络输出头的维度
+  vector<int> segment_head_dims_;
+  int num_classes_ = 0;
+  bool has_segment_ = false;                        // 是否有分割
+  bool isdynamic_model_ = false;                    // 判断模型是否为动态batch
+  vector<shared_ptr<trt::Memory<unsigned char>>> box_segment_cache_;
 
-  virtual ~InferImpl()=default;
+  virtual ~InferImpl() = default;
 
-  void adjust_memory(int batch_size){
-    size_t input_numel=network_input_width_*network_input_height_*3;
-    input_buffer_.gpu(batch_size*input_numel);
-    bbox_predict_.gpu(batch_size*bbox_head_dims_[1]*bbox_head_dims_[3]);
-    output_boxarray_.gpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));
-    output_boxarray_.cpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));
+  // 根据批次大小调整共享内存大小
+  void adjust_memory(int batch_size) {
+    // 输入图像的元素个数
+    size_t input_numel = network_input_width_ * network_input_height_ * 3;
+    input_buffer_.gpu(batch_size * input_numel);
+    bbox_predict_.gpu(batch_size * bbox_head_dims_[1] * bbox_head_dims_[2]);
+    output_boxarray_.gpu(batch_size * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT));
+    output_boxarray_.cpu(batch_size * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT));
 
-    if((int)preprocess_buffers_.size()<batch_size){
-      for(int i=preprocess_buffers_.size();i<batch_size;++i){
-        preprocess_buffers_.push_back(std::make_shared<trt::Memory<unsigned char>>());
-      }
+    if (has_segment_)
+      segment_predict_.gpu(batch_size * segment_head_dims_[1] * segment_head_dims_[2] *
+                           segment_head_dims_[3]);
+
+    // 扩展预处理的buffer
+    if ((int)preprocess_buffers_.size() < batch_size) {
+      for (int i = preprocess_buffers_.size(); i < batch_size; ++i)
+        preprocess_buffers_.push_back(make_shared<trt::Memory<unsigned char>>());
     }
   }
 
-  void preprocess(int ibatch,const Image &image,
-                  std::shared_ptr<trt::Memory<unsigned char>> preprocess_buffer_,
-                  AffineMatrix &affine,void *stream=nullptr){
-    affine.compute(std::make_tuple(image.width,image.height),
-                   std::make_tuple(network_input_width_,network_input_height_));
-    size_t input_numel=network_input_width_*network_input_height_*3;
+  // ---------------------preprocess--------------------
+  void preprocess(int ibatch, const Image &image,
+                  shared_ptr<trt::Memory<unsigned char>> preprocess_buffer, AffineMatrix &affine,
+                  void *stream = nullptr) {
+    // 根据输入图像以及网络输入计算转换仿射矩阵
+    affine.compute(make_tuple(image.width, image.height),
+                   make_tuple(network_input_width_, network_input_height_));
 
-    float *input_device=input_buffer_.gpu()+ibatch*input_numel;
+    // 网络输入number element
+    size_t input_numel = network_input_width_ * network_input_height_ * 3;
 
-    size_t size_image=image.width*image.height*3;
-    size_t size_matrix=upbound(sizeof(affine.d2i),32);
-    uint8_t *gpu_workspace=preprocess_buffer_->gpu(size_matrix+size_image);
-    float *affine_matrix_device=(float *)gpu_workspace;
-    uint8_t *image_device=gpu_workspace+size_matrix;
+    float *input_device = input_buffer_.gpu() + ibatch * input_numel;
+    // 输入图像元素个数
+    size_t size_image = image.width * image.height * 3;
+    size_t size_matrix = upbound(sizeof(affine.d2i), 32);
+    uint8_t *gpu_workspace = preprocess_buffer->gpu(size_matrix + size_image);
+    float *affine_matrix_device = (float *)gpu_workspace;
+    uint8_t *image_device = gpu_workspace + size_matrix;
 
-    uint8_t *cpu_workspace=preprocess_buffer_->cpu(size_matrix+size_image);
-    float *affine_matrix_host=(float *)cpu_workspace;
-    uint8_t *image_host=cpu_workspace+size_matrix;
+    uint8_t *cpu_workspace = preprocess_buffer->cpu(size_matrix + size_image);
+    float *affine_matrix_host = (float *)cpu_workspace;
+    uint8_t *image_host = cpu_workspace + size_matrix;
 
+    // speed up
     cudaStream_t stream_ = (cudaStream_t)stream;
     memcpy(image_host, image.bgrptr, size_image);
     memcpy(affine_matrix_host, affine.d2i, sizeof(affine.d2i));
-
+    // 将image数据从host复制到device
     checkRuntime(
-        cudaMemcpyAsync(image_device,image_host,size_image,cudaMemcpyHostToDevice,stream_));
-    checkRuntime(cudaMemcpyAsync(affine_matrix_device,affine_matrix_host,sizeof(affine.d2i),
-                                 cudaMemcpyHostToDevice,stream_));
-    warp_affine_bilinear_and_normalize_plane(image_device,image.width * 3,image.width,
-                                             image.height,input_device,network_input_width_,
-                                             network_input_height_,affine_matrix_device,114,
-                                             normalize_,stream_);
+        cudaMemcpyAsync(image_device, image_host, size_image, cudaMemcpyHostToDevice, stream_));
+    // 将反射矩阵从host复制到device
+    checkRuntime(cudaMemcpyAsync(affine_matrix_device, affine_matrix_host, sizeof(affine.d2i),
+                                 cudaMemcpyHostToDevice, stream_));
+    // 反射变化、双线性插值、归一化
+    warp_affine_bilinear_and_normalize_plane(image_device, image.width * 3, image.width,
+                                             image.height, input_device, network_input_width_,
+                                             network_input_height_, affine_matrix_device, 114,
+                                             normalize_, stream_);
   }
 
-  bool load(const std::string &engine_file,float confidence_threshold,float nms_threshold){
-    trt_=trt::load(engine_file);
-    if(trt_==nullptr) return false;
+  // 加载trtexec生成的engine模型
+  bool load(const string &engine_file, float confidence_threshold, float nms_threshold) {
+    trt_ = trt::load(engine_file);      // 加载engine文件，返回trt::infer派生类智能指针
+    if (trt_ == nullptr) return false;    // 加载失败直接返回
 
-    trt_->print();
+    trt_->print();      // 打印网络输入输出信息
 
-    this->confidence_threshold_=confidence_threshold;
-    this->nms_threshold_=nms_threshold;
+    this->confidence_threshold_ = confidence_threshold;
+    this->nms_threshold_ = nms_threshold;
 
-    auto input_dim=trt_->static_dims(0);
-    bbox_head_dims_=trt_->static_dims(1);
+    auto input_dim = trt_->static_dims(0);      // 获取输入维度
+    bbox_head_dims_ = trt_->static_dims(1);     // 获取输出维度
 
-    network_input_width_=input_dim[3];
-    network_input_height_=input_dim[2];
-    isdynamic_model_=trt_->has_dynamic_dim();
+    // printf("box_head_dims_=%d;\n",bbox_head_dims_[2]);
+    network_input_width_ = input_dim[3];       // input_dim={-1,c,h,w}
+    network_input_height_ = input_dim[2];
+    isdynamic_model_ = trt_->has_dynamic_dim();   // 判断模型是否用动态的维度
 
-    normalize_=Norm::alpha_beta(1/255.0f,0.0f,ChannelType::SwapRB);
-    num_classes_=bbox_head_dims_[2]-4;
-
+    normalize_ = Norm::alpha_beta(1 / 255.0f, 0.0f, ChannelType::SwapRB);
+    num_classes_ = bbox_head_dims_[2] - 4;
+   
     return true;
   }
 
-  virtual BoxArray forward(const Image &image,void *stream=nullptr) override{
-    auto output=forwards({image},stream);
+  // 模型推理，单张图像
+  virtual BoxArray forward(const Image &image, void *stream = nullptr) override {
+    auto output = forwards({image}, stream);
+    if (output.empty()) return {};        // 返回返回值的初始化值
     return output[0];
   }
 
-  virtual std::vector<BoxArray> forwards(const std::vector<Image> &images,void *stream=nullptr) override{
-    int num_image=images.size();
-    if(num_image==0) return {};
-    auto input_dims=trt_->static_dims(0);
-    int infer_batch_size=input_dims[0];
-
-    if(infer_batch_size!=num_image){
-      if(isdynamic_model_){
-        infer_batch_size=num_image;
-        input_dims[0]=num_image;
-        if(!trt_->set_run_dims(0,input_dims)) return{};
-      }else{
-        if(infer_batch_size<num_image){
-          INFO("When using static shape model, number of images[%d] must be "
+  // 推理多张图像
+  virtual vector<BoxArray> forwards(const vector<Image> &images, void *stream = nullptr) override {
+    int num_image = images.size();            // 获取输入图像数量
+    if (num_image == 0) return {};            // 如果输入数量为0，直接返回
+    auto input_dims = trt_->static_dims(0);   // 获取模型输入维度
+    // 推理时的batch大小
+    int infer_batch_size = input_dims[0];
+    // 如果模型输入batch size和输入图像数量不同
+    if (infer_batch_size != num_image) {
+      // 如果是动态输入模型，设置模型infer时输入维度
+      if (isdynamic_model_) {
+        infer_batch_size = num_image;
+        input_dims[0] = num_image;
+        if (!trt_->set_run_dims(0, input_dims)) return {};        // 设置输入维度失败返回空的vector<BoxArray>
+      } else {
+        // 如果不是动态batch模型，并且infer batch size小于输入图像数量，直接返回空vector<BoxArray>
+        if (infer_batch_size < num_image) {
+          INFO(
+              "When using static shape model, number of images[%d] must be "
               "less than or equal to the maximum batch[%d].",
-              num_image,infer_batch_size);
+              num_image, infer_batch_size);
           return {};
         }
       }
     }
-
+    // 根据batch size调整memory
     adjust_memory(infer_batch_size);
 
-    std::vector<AffineMatrix> affine_matrixs(num_image);
-    cudaStream_t stream_=(cudaStream_t)stream;
-    for(int i=0;i<num_image;++i){
-      preprocess(i,images[i],preprocess_buffers_[i],affine_matrixs[i],stream);
+    vector<AffineMatrix> affine_matrixs(num_image);
+    cudaStream_t stream_ = (cudaStream_t)stream;        // 定义cuda stream
+    for (int i = 0; i < num_image; ++i)
+      preprocess(i, images[i], preprocess_buffers_[i], affine_matrixs[i], stream);
+
+    float *bbox_output_device = bbox_predict_.gpu();
+    vector<void *> bindings{input_buffer_.gpu(), bbox_output_device};
+
+    if (has_segment_) {
+      bindings = {input_buffer_.gpu(), segment_predict_.gpu(), bbox_output_device};
     }
 
-    float *bbox_output_device=bbox_predict_.gpu();
-    std::vector<void *> bindings{input_buffer_.gpu(),bbox_output_device};
-
-    if (!trt_->forward(bindings,stream)) {
+    if (!trt_->forward(bindings, stream)) {
       INFO("Failed to tensorRT forward.");
       return {};
     }
 
-    for(int ib=0;ib<num_image;++ib){
-      float *boxarray_device=output_boxarray_.gpu()+ib*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT);
-      float* affine_matrix_device=(float *)preprocess_buffers_[ib]->gpu();
-
-      float *image_based_bbox_output=bbox_output_device+ib*(bbox_head_dims_[1]*bbox_head_dims_[2]);
-      checkRuntime(cudaMemsetAsync(boxarray_device,0,sizeof(int),stream_));
-      decode_kernel_invoker(image_based_bbox_output,bbox_head_dims_[1],num_classes_,
-                            bbox_head_dims_[2],confidence_threshold_,nms_threshold_,
-                            affine_matrix_device,boxarray_device,MAX_IMAGE_BOXES,stream_);
+    for (int ib = 0; ib < num_image; ++ib) {
+      float *boxarray_device =
+          output_boxarray_.gpu() + ib * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT);
+      float *affine_matrix_device = (float *)preprocess_buffers_[ib]->gpu();
+      float *image_based_bbox_output =
+          bbox_output_device + ib * (bbox_head_dims_[1] * bbox_head_dims_[2]);
+      checkRuntime(cudaMemsetAsync(boxarray_device, 0, sizeof(int), stream_));
+      decode_kernel_invoker(image_based_bbox_output, bbox_head_dims_[1], num_classes_,
+                            bbox_head_dims_[2], confidence_threshold_, nms_threshold_,
+                            affine_matrix_device, boxarray_device, MAX_IMAGE_BOXES,stream_);
     }
-
-    checkRuntime(cudaMemcpyAsync(output_boxarray_.cpu(),output_boxarray_.gpu(),
-                                 output_boxarray_.gpu_bytes(),cudaMemcpyDeviceToHost,stream_));
+    checkRuntime(cudaMemcpyAsync(output_boxarray_.cpu(), output_boxarray_.gpu(),
+                                 output_boxarray_.gpu_bytes(), cudaMemcpyDeviceToHost, stream_));
     checkRuntime(cudaStreamSynchronize(stream_));
 
-    std::vector<BoxArray> arrout(num_image);
-    int imemory=0;
-    for (int ib=0;ib<num_image;++ib){
+    vector<BoxArray> arrout(num_image);
+    int imemory = 0;
+    for (int ib = 0; ib < num_image; ++ib) {
       float *parray = output_boxarray_.cpu() + ib * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT);
       int count = min(MAX_IMAGE_BOXES, (int)*parray);
       BoxArray &output = arrout[ib];
       output.reserve(count);
-      for(int i = 0; i < count; ++i){
+      for (int i = 0; i < count; ++i) {
         float *pbox = parray + 1 + i * NUM_BOX_ELEMENT;
         int label = pbox[5];
         int keepflag = pbox[6];
@@ -474,62 +617,69 @@ class InferImpl:public Infer{
         }
       }
     }
-    return arrout; 
+
+    if (has_segment_) checkRuntime(cudaStreamSynchronize(stream_));
+
+    return arrout;
   }
 };
 
+// 加载原始数据
 Infer *loadraw(const std::string &engine_file,float confidence_threshold,float nms_threshold){
-  InferImpl *impl=new InferImpl();
+  InferImpl *impl = new InferImpl();
+  // load是infer子类中的load
   if (!impl->load(engine_file,confidence_threshold, nms_threshold)) {
-    delete impl;
+    delete impl;              // 编译器只会释放指针指向的空间，不会删除指针本身
     impl = nullptr;
   }
   return impl;
 }
 
-std::shared_ptr<Infer> load(const std::string &engine_file,float confidence_threshold,float nms_threshold){
-  return std::shared_ptr<InferImpl>((InferImpl *)loadraw(engine_file,confidence_threshold,nms_threshold));
+// 加载模型
+shared_ptr<Infer> load(const string &engine_file, float confidence_threshold, float nms_threshold) {
+  return std::shared_ptr<InferImpl>((InferImpl *)loadraw(engine_file,confidence_threshold, nms_threshold));
 }
 
-std::tuple<uint8_t, uint8_t, uint8_t> hsv2bgr(float h,float s,float v) {
-  const int h_i=static_cast<int>(h*6);
-  const float f=h*6-h_i;
-  const float p=v*(1-s);
-  const float q=v*(1-f*s);
-  const float t=v*(1-(1-f)*s);
-  float r,g,b;
-  switch(h_i){
+// hsv转换成bgr
+std::tuple<uint8_t, uint8_t, uint8_t> hsv2bgr(float h, float s, float v) {
+  const int h_i = static_cast<int>(h * 6);
+  const float f = h * 6 - h_i;
+  const float p = v * (1 - s);
+  const float q = v * (1 - f * s);
+  const float t = v * (1 - (1 - f) * s);
+  float r, g, b;
+  switch (h_i) {
     case 0:
-      r=v,g=t,b=p;
+      r = v, g = t, b = p;
       break;
     case 1:
-      r=q,g=v,b=p;
+      r = q, g = v, b = p;
       break;
     case 2:
-      r=p,g=v,b=t;
+      r = p, g = v, b = t;
       break;
     case 3:
-      r=p,g=q,b=v;
+      r = p, g = q, b = v;
       break;
     case 4:
-      r=t,g=p,b=v;
+      r = t, g = p, b = v;
       break;
     case 5:
-      r=v,g=p,b=q;
+      r = v, g = p, b = q;
       break;
     default:
-      r=1,g=1,b=1;
+      r = 1, g = 1, b = 1;
       break;
   }
-  return std::make_tuple(static_cast<uint8_t>(b*255),static_cast<uint8_t>(g*255),
-                    static_cast<uint8_t>(r*255));
+  return make_tuple(static_cast<uint8_t>(b * 255), static_cast<uint8_t>(g * 255),
+                    static_cast<uint8_t>(r * 255));
 }
 
-std::tuple<uint8_t,uint8_t,uint8_t> random_color(int id){
-  float h_plane=((((unsigned int)id << 2)^0x937151)%100)/100.0f;
-  float s_plane=((((unsigned int)id << 3)^0x315793)%100)/100.0f;
-  return hsv2bgr(h_plane,s_plane,1);
+// 随机颜色画图
+std::tuple<uint8_t, uint8_t, uint8_t> random_color(int id) {
+  float h_plane = ((((unsigned int)id << 2) ^ 0x937151) % 100) / 100.0f;
+  float s_plane = ((((unsigned int)id << 3) ^ 0x315793) % 100) / 100.0f;
+  return hsv2bgr(h_plane, s_plane, 1);
 }
 
-} // namespace yolo
-
+};  // namespace yolo
