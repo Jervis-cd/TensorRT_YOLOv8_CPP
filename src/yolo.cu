@@ -114,7 +114,7 @@ static __global__ void decode_kernel_v8(float *predict,int num_bboxes,int num_cl
   float width=*pitem++;
   float height=*pitem++;
 
-  // center x,center y,w,h ----> left-top,right-bottom
+  // center x,center y,w,h ---> left-top,right-bottom
   float left=cx-width*0.5f;
   float top=cy-height*0.5f;
   float right=cx+width*0.5f;
