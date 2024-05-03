@@ -137,40 +137,41 @@ static __global__ void decode_kernel_v8(float *predict,int num_bboxes,int num_cl
 }
 
 // 设备函数（在设备上执行，由核函数或其他设备函数调用），计算IOU
-static __device__ float box_iou(float aleft, float atop, float aright, float abottom, float bleft,
-                                float btop, float bright, float bbottom) {
-  float cleft = max(aleft, bleft);
-  float ctop = max(atop, btop);
-  float cright = min(aright, bright);
-  float cbottom = min(abottom, bbottom);
+static __device__ float box_iou(float aleft,float atop,float aright,float abottom,float bleft,
+                                float btop,float bright,float bbottom){
+  float cleft=max(aleft,bleft);
+  float ctop=max(atop,btop);
+  float cright=min(aright,bright);
+  float cbottom=min(abottom,bbottom);
 
-  float c_area = max(cright - cleft, 0.0f) * max(cbottom - ctop, 0.0f);
-  if (c_area == 0.0f) return 0.0f;
+  float c_area=max(cright-cleft,0.0f)*max(cbottom-ctop,0.0f);
 
-  float a_area = max(0.0f, aright - aleft) * max(0.0f, abottom - atop);
-  float b_area = max(0.0f, bright - bleft) * max(0.0f, bbottom - btop);
-  return c_area / (a_area + b_area - c_area);
+  if(c_area==0.0f) return 0.0f;
+
+  float a_area=max(0.0f,aright-aleft)*max(0.0f,abottom-atop);
+  float b_area=max(0.0f,bright-bleft)*max(0.0f,bbottom-btop);
+  return c_area/(a_area+b_area-c_area);
 }
 
 // 核函数，实现快速nms
-static __global__ void fast_nms_kernel(float *bboxes, int MAX_IMAGE_BOXES, float threshold) {
-  int position = (blockDim.x * blockIdx.x + threadIdx.x);
-  int count = min((int)*bboxes, MAX_IMAGE_BOXES);
+static __global__ void fast_nms_kernel(float *bboxes,int MAX_IMAGE_BOXES,float threshold){
+  int position=(blockDim.x*blockIdx.x+threadIdx.x);
+  int count=min((int)*bboxes,MAX_IMAGE_BOXES);
   if (position >= count) return;
 
-  // left, top, right, bottom, confidence, class, keepflag
-  float *pcurrent = bboxes + 1 + position * NUM_BOX_ELEMENT;
-  for (int i = 0; i < count; ++i) {
-    float *pitem = bboxes + 1 + i * NUM_BOX_ELEMENT;
-    if (i == position || pcurrent[5] != pitem[5]) continue;
+  // left,top,right,bottom,confidence,class,keepflag
+  float *pcurrent=bboxes+1+position*NUM_BOX_ELEMENT;
+  for (int i=0;i<count;++i){
+    float *pitem=bboxes+1+i*NUM_BOX_ELEMENT;
+    if(i==position || pcurrent[5]!=pitem[5]) continue;
 
-    if (pitem[4] >= pcurrent[4]) {
-      if (pitem[4] == pcurrent[4] && i < position) continue;
+    if (pitem[4]>=pcurrent[4]) {
+      if(pitem[4]==pcurrent[4] && i<position) continue;
 
-      float iou = box_iou(pcurrent[0], pcurrent[1], pcurrent[2], pcurrent[3], pitem[0], pitem[1],
-                          pitem[2], pitem[3]);
-      if (iou > threshold) {
-        pcurrent[6] = 0;  // 1=keep, 0=ignore
+      float iou=box_iou(pcurrent[0],pcurrent[1],pcurrent[2],pcurrent[3],pitem[0],pitem[1],
+                        pitem[2],pitem[3]);
+      if(iou>threshold){
+        pcurrent[6]=0;  // 1=keep, 0=ignore
         return;
       }
     }
