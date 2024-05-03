@@ -400,7 +400,6 @@ class InferImpl:public Infer{
     return true;
   }
 
-
   virtual BoxArray forward(const Image &image,void *stream=nullptr) override{
     auto output=forwards({image},stream);
     return output[0];

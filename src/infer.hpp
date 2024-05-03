@@ -35,7 +35,7 @@ class BaseMemory{
   size_t gpu_bytes_=0,gpu_capacity_=0;
   bool owner_gpu_=true;
  public:
-  BaseMemory()=delete;
+  BaseMemory()=default;
   BaseMemory(void *cpu,size_t cpu_bytes,void *gpu,size_t gpu_bytes);
 
   virtual ~BaseMemory();
@@ -66,7 +66,7 @@ class Memory:public BaseMemory{
   virtual _DT *cpu(size_t size){return (_DT *)BaseMemory::cpu_realloc(size *sizeof(_DT));}
 
   inline size_t cpu_size() const{return cpu_bytes_/sizeof(_DT);}
-  inline size_t gpu_size() const{return gpu_bytes_/size_t(_DT);}
+  inline size_t gpu_size() const{return gpu_bytes_/sizeof(_DT);}
 
   virtual inline _DT *gpu() const{return (_DT *)gpu_;}
   virtual inline _DT *cpu() const{return (_DT *)cpu_;}

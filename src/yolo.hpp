@@ -31,7 +31,7 @@ typedef std::vector<Box> BoxArray;
 
 class Infer{
  public:
-  virtual BoxArray forward(const Image &image,void *stream = nullptr)=0;
+  virtual BoxArray forward(const Image &image,void *stream=nullptr)=0;
   virtual std::vector<BoxArray> forwards(const std::vector<Image> &images,void *stream=nullptr)=0;
 };
 

@@ -295,7 +295,7 @@ class InferImpl:public Infer{
     return true;
   }
 
-  bool load(const std::string &file,float confidence_threshold,float nms_threshold){
+  bool load(const std::string &file){
     auto data=load_file(file);
     if(data.empty()){
       INFO("An empty file has been loaded. Please confirm your file path: %s",file.c_str());
@@ -378,7 +378,7 @@ class InferImpl:public Infer{
   // 判断模型是否为有动态维度的模型
   virtual bool has_dynamic_dim() override{
     int numBindings=this->context_->engine_->getNbBindings();
-    for(int i=0;i<numBindings;++i) {
+    for(int i=0;i<numBindings;++i){
       nvinfer1::Dims dims=this->context_->engine_->getBindingDimensions(i);
       for(int j=0;j<dims.nbDims;++j) {
         if(dims.d[j]==-1) return true;
@@ -417,16 +417,16 @@ class InferImpl:public Infer{
   }
  };
 
-Infer *loadraw(const std::string &engine_file,float confidence_threshold,float nms_threshold){
+Infer *loadraw(const std::string &file){
   InferImpl *impl = new InferImpl();
-  if (!impl->load(engine_file,confidence_threshold,nms_threshold)){
+  if(!impl->load(file)){
     delete impl;
     impl = nullptr;
   }
   return impl;
 }
 
-std::shared_ptr<Infer> load(const std::string &engine_file,float confidence_threshold,float nms_threshold) {
-  return std::shared_ptr<InferImpl>((InferImpl *)loadraw(engine_file,confidence_threshold,nms_threshold));
+std::shared_ptr<Infer> load(const std::string &file){
+  return std::shared_ptr<InferImpl>((InferImpl *)loadraw(file));
 }
 } // namespace trt
