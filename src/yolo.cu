@@ -1,7 +1,7 @@
 #include "infer.hpp"
 #include "yolo.hpp"
 
-namespace yolo {
+namespace yolo{
 
 #define GPU_BLOCK_THREADS 512
 
@@ -81,10 +81,10 @@ static __host__ __device__ void affine_project(float *matrix,float x,float y,flo
   *oy=matrix[3]*x+matrix[4]*y+matrix[5];
 }
 
-/* 核函数，网络v8模型推理结果解码 */
-static __global__ void decode_kernel_v8(float *predict, int num_bboxes, int num_classes,
-                                        int output_cdim, float confidence_threshold,
-                                        float *invert_affine_matrix, float *parray,
+/* 核函数（由host函数调用），网络v8模型推理结果解码 */
+static __global__ void decode_kernel_v8(float *predict,int num_bboxes,int num_classes,
+                                        int output_cdim,float confidence_threshold,
+                                        float *invert_affine_matrix,float *parray,
                                         int MAX_IMAGE_BOXES){
   int position=blockDim.x*blockIdx.x+threadIdx.x;         // 当前线程id以及执行的位置
   if(position>=num_bboxes) return;        // 位置大于anchor point数量，直接返回
@@ -104,29 +104,36 @@ static __global__ void decode_kernel_v8(float *predict, int num_bboxes, int num_
   // 如果confidence小于阈值，直接返回
   if (confidence<confidence_threshold) return;
 
-  int index=atomicAdd(parray,1);
-  if (index >= MAX_IMAGE_BOXES) return;
+  int index=atomicAdd(parray,1);              // 将parray指针指向的值+1后，写到parray中
+                                              // 用于记录检测图像的总数
+  if (index>=MAX_IMAGE_BOXES) return;     // 如果大于设置的最大检测数量，直接返回
 
-  float cx = *pitem++;
-  float cy = *pitem++;
-  float width = *pitem++;
-  float height = *pitem++;
-  float left = cx - width * 0.5f;
-  float top = cy - height * 0.5f;
-  float right = cx + width * 0.5f;
-  float bottom = cy + height * 0.5f;
-  affine_project(invert_affine_matrix, left, top, &left, &top);
-  affine_project(invert_affine_matrix, right, bottom, &right, &bottom);
+  // 解码模型获取box center x,center y,w,h
+  float cx=*pitem++;
+  float cy=*pitem++;
+  float width=*pitem++;
+  float height=*pitem++;
 
-  float *pout_item = parray + 1 + index * NUM_BOX_ELEMENT;
-  *pout_item++ = left;
-  *pout_item++ = top;
-  *pout_item++ = right;
-  *pout_item++ = bottom;
-  *pout_item++ = confidence;
-  *pout_item++ = label;
-  *pout_item++ = 1;  // 1 = keep, 0 = ignore
-  *pout_item++ = position;
+  // center x,center y,w,h ----> left-top,right-bottom
+  float left=cx-width*0.5f;
+  float top=cy-height*0.5f;
+  float right=cx+width*0.5f;
+  float bottom=cy+height*0.5f;
+
+  // 逆仿射变换，转换到原图坐标
+  affine_project(invert_affine_matrix,left,top,&left,&top);
+  affine_project(invert_affine_matrix,right,bottom,&right,&bottom);
+
+  //todo 输出量
+  float *pout_item=parray+1+index*NUM_BOX_ELEMENT;
+  *pout_item++=left;            // 将left指针赋值给pout_item解引用之后的值，然后指针+1
+  *pout_item++=top;
+  *pout_item++=right;
+  *pout_item++=bottom;
+  *pout_item++=confidence;
+  *pout_item++=label;
+  *pout_item++=1;               // 1=keep, 0=ignore
+  *pout_item++=position;
 }
 
 // 设备函数（在设备上执行，由核函数或其他设备函数调用），计算IOU
