@@ -485,7 +485,7 @@ public:
       return {};
     }
 
-    for (int ib=0;ib<num_image;++ib){
+    for(int ib=0;ib<num_image;++ib){
       float *boxarray_device=output_boxarray_.gpu()+ib*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT);
       float *affine_matrix_device=(float *)preprocess_buffers_[ib]->gpu();
       float *image_based_bbox_output=bbox_output_device+ib*(bbox_head_dims_[1]*bbox_head_dims_[2]);
@@ -500,7 +500,7 @@ public:
     // 将数据从gpu复制到cpu
     checkRuntime(cudaMemcpyAsync(output_boxarray_.cpu(),output_boxarray_.gpu(),
                                  output_boxarray_.gpu_bytes(),cudaMemcpyDeviceToHost,stream_));
-    checkRuntime(cudaStreamSynchronize(stream_));         // 同步流
+    checkRuntime(cudaStreamSynchronize(stream_));         // 同步流, 等待所有的操作完成
 
     std::vector<BoxArray> arrout(num_image);
     int imemory=0;
@@ -513,7 +513,8 @@ public:
         float *pbox=parray+1+i*NUM_BOX_ELEMENT;
         int label=pbox[5];
         int keepflag=pbox[6];
-        if (keepflag==1){
+        // 将所有满足置信度阈值和nms之后的框加入到output中
+        if(keepflag==1){
           Box result_object_box(pbox[0],pbox[1],pbox[2],pbox[3],pbox[4],label);
           output.emplace_back(result_object_box);
         }
