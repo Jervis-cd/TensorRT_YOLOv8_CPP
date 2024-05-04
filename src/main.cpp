@@ -34,8 +34,8 @@ yolo::Image cvimg(const cv::Mat &image){
   return yolo::Image(image.data,image.cols,image.rows);
 }
 
-void batch_inference() {
-  std::vector<cv::Mat> images{cv::imread("images/car.jpg")};
+void batch_inference(){
+  std::vector<cv::Mat> images{cv::imread("images/car.jpg"),cv::imread("images/zand.jpg")};
   auto yolo = yolo::load("yolov8n.transd.engine");
   if (yolo == nullptr) return;
 
