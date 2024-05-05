@@ -61,10 +61,10 @@ void batch_inference(){
       int width=cv::getTextSize(caption,0,1,2,nullptr).width+10;
       cv::rectangle(image,cv::Point(obj.left-3,obj.top-33),
                     cv::Point(obj.left+width,obj.top),cv::Scalar(b,g,r),-1);
-      cv::putText(image,caption,cv::Point(obj.left, obj.top-5),0,1,cv::Scalar::all(0),2,16);
+      cv::putText(image,caption,cv::Point(obj.left,obj.top-5),0,1,cv::Scalar::all(0),2,16);
     }
     printf("Save result to Result.jpg, %d objects\n",(int)objs.size());
-    cv::imwrite(cv::format("Result%d.jpg", ib),image);
+    cv::imwrite(cv::format("Result%d.jpg",ib),image);
   }
 }
 
