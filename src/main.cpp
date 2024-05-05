@@ -34,11 +34,9 @@ yolo::Image cvimg(const cv::Mat &image){
   return yolo::Image(image.data,image.cols,image.rows);
 }
 
-void batch_inference(){
-  // 推理原始图像
-  std::vector<cv::Mat> images{cv::imread("images/car.jpg"),cv::imread("images/zand.jpg")};
+void batch_inference(std::vector<cv::Mat> images,std::string engine_file){
   // 加载engine文件，加载失败直接返回
-  auto yolo=yolo::load("yolov8n.transd.engine");
+  auto yolo=yolo::load(engine_file);
   if(yolo==nullptr) return;
 
   // 将images中元素，逐一执行cvimg函数后，存储在yoloimages中
@@ -69,6 +67,8 @@ void batch_inference(){
 }
 
 int main(int argc,char *argv[]){
-  batch_inference();
+  std::vector<cv::Mat> images{cv::imread("images/car.jpg"),cv::imread("images/zand.jpg")};
+  std::string engine_file="yolov8n.transd.engine";
+  batch_inference(images,engine_file);
   return 0;
 }
