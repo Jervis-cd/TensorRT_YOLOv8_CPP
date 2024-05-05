@@ -24,3 +24,7 @@ trtexec --onnx=workspace/yolov8n.transd.onnx        \
     --optShapes=images:1x3x640x640                  \
     --saveEngine=workspace/yolov8n.transd.engine
 ```
+### step4: 执行推理（需要替换Makefile中CUDA/TensorRT...等库为你的路径）
+```
+make run
+```
