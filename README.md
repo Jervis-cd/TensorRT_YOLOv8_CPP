@@ -6,7 +6,7 @@
 ## 使用流程
 ### step1: YOLOv8.pt $\Longrightarrow$ YOLOv8.onnx
 1.YOLOv8 export()函数设置动态维度时，会同时将batch,height,width都设置成动态维度（后面两者无必要，且会造成错误）             \
-2.可以用<https://github.com/Jervis-cd/Parse-YOLOv8>仓库中```export.py```进行模型导出（只将维度进行动态）
+2.可以用<https://github.com/Jervis-cd/Parse-YOLOv8>仓库中```export.py```进行模型导出（只将batch维度设置为动态）
 
 ### step2: YOLOv8.onnx $\Longrightarrow$ YOLOv8.transd.onnx
 使用workspace下v8trans.py脚本交换onnx模型输出
