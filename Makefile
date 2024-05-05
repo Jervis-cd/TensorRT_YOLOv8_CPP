@@ -5,7 +5,7 @@ objdir    := objs
 
 cc        := g++
 stdcpp    := c++11
-nvcc	  	:= /usr/local/cuda-11.6/bin/nvcc -ccbin=$(cc)
+nvcc	  := /usr/local/cuda-11.6/bin/nvcc -ccbin=$(cc)
 cuda_arch := 
 
 syslib    := /usr/local/lib /usr/lib64
@@ -24,13 +24,13 @@ cu_objs := $(cu_objs:$(srcdir)/%=$(objdir)/%)
 cu_mk   := $(cu_objs:.cu.o=.cu.mk)
 
 include_paths := src				\
-  $(cuda_home)/include     	\
+  $(cuda_home)/include     			\
 	$(TensorRT)/include 			\
 	$(opencv)/include/opencv4
 
 library_paths := $(cuda_home)/lib64 \
-	$(syslib)													\
-	$(opencv)/lib											\
+	$(syslib)						\
+	$(opencv)/lib					\
 	$(TensorRT)/lib
 
 empty := 
