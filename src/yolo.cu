@@ -361,13 +361,14 @@ public:
   // 根据批次大小调整共享内存大小
   void adjust_memory(int batch_size){
     size_t input_numel=network_input_width_*network_input_height_*3;
-    input_buffer_.gpu(batch_size*input_numel);              // 分配gpu内存
-    bbox_predict_.gpu(batch_size*bbox_head_dims_[1]*bbox_head_dims_[2]);      // 分配网络输出gpu内存
-    output_boxarray_.gpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));    // 分配输出box的
+    input_buffer_.gpu(batch_size*input_numel);              // 分配输入占用的gpu内存
+    bbox_predict_.gpu(batch_size*bbox_head_dims_[1]*bbox_head_dims_[2]);      // 分配网络输出占用gpu内存
+    // todo为什么需要多分配32bytes字节内存
+    output_boxarray_.gpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));    // 不确定输出box个数，所以按照最大可检测数量分配内存
     output_boxarray_.cpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));
 
     // 如果preprocess_buffers_的size小于batch_size，进行扩展
-    if((int)preprocess_buffers_.size()<batch_size) {
+    if((int)preprocess_buffers_.size()<batch_size){
       for(int i=preprocess_buffers_.size();i<batch_size;++i)
         preprocess_buffers_.push_back(std::make_shared<trt::Memory<unsigned char>>());
     }
@@ -452,13 +453,14 @@ public:
     int infer_batch_size=input_dims[0];
     // 如果模型输入batch size和输入图像数量不同
     if(infer_batch_size!=num_image){
-      // 如果是动态输入模型，设置模型infer时输入维度
+      // 如果是动态输入模型，设置模型infer时输入batch
       if(isdynamic_model_){
         infer_batch_size=num_image;
         input_dims[0]=num_image;
         if(!trt_->set_run_dims(0,input_dims)) return {};        // 设置输入维度失败返回空的vector<BoxArray>
       }else{
         // 如果不是动态batch模型，并且infer batch size小于输入图像数量，直接返回空vector<BoxArray>
+        // 静态维度模型支持小于或等于静态batch维度图像输入
         if(infer_batch_size<num_image){
           INFO(
               "When using static shape model, number of images[%d] must be "
@@ -472,7 +474,7 @@ public:
     adjust_memory(infer_batch_size);
 
     std::vector<AffineMatrix> affine_matrixs(num_image);
-    cudaStream_t stream_=(cudaStream_t)stream;        // 定义cuda stream
+    cudaStream_t stream_=(cudaStream_t)stream;        // 创建cuda stream
     // 逐张预处理输入图像
     for (int i=0;i<num_image;++i)
       preprocess(i,images[i],preprocess_buffers_[i],affine_matrixs[i],stream);
@@ -486,6 +488,7 @@ public:
     }
 
     for(int ib=0;ib<num_image;++ib){
+      // 创建device内存，
       float *boxarray_device=output_boxarray_.gpu()+ib*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT);
       float *affine_matrix_device=(float *)preprocess_buffers_[ib]->gpu();
       float *image_based_bbox_output=bbox_output_device+ib*(bbox_head_dims_[1]*bbox_head_dims_[2]);
