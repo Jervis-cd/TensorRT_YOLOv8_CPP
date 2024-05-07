@@ -297,7 +297,7 @@ static void warp_affine_bilinear_and_normalize_plane(uint8_t *src,int src_line_s
                                                      uint8_t const_value,const Norm &norm,
                                                      cudaStream_t stream){
   dim3 grid((dst_width+31)/32,(dst_height+31)/32);
-  dim3 block(32,32);
+  dim3 block(32,32);          // 1024个线程
 
   checkKernel(warp_affine_bilinear_and_normalize_plane_kernel<<<grid,block,0,stream>>>(
       src,src_line_size,src_width,src_height,dst,dst_width,dst_height,const_value,
@@ -363,7 +363,7 @@ public:
     size_t input_numel=network_input_width_*network_input_height_*3;
     input_buffer_.gpu(batch_size*input_numel);              // 分配输入占用的gpu内存
     bbox_predict_.gpu(batch_size*bbox_head_dims_[1]*bbox_head_dims_[2]);      // 分配网络输出占用gpu内存
-    // todo为什么需要多分配32bytes字节内存
+    // +32是因为存储了仿射变换矩阵
     output_boxarray_.gpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));    // 不确定输出box个数，所以按照最大可检测数量分配内存
     output_boxarray_.cpu(batch_size*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT));
 
@@ -488,7 +488,7 @@ public:
     }
 
     for(int ib=0;ib<num_image;++ib){
-      // 创建device内存，
+      // 创建device内存
       float *boxarray_device=output_boxarray_.gpu()+ib*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT);
       float *affine_matrix_device=(float *)preprocess_buffers_[ib]->gpu();
       float *image_based_bbox_output=bbox_output_device+ib*(bbox_head_dims_[1]*bbox_head_dims_[2]);
@@ -507,7 +507,7 @@ public:
 
     std::vector<BoxArray> arrout(num_image);
     int imemory=0;
-    for (int ib=0;ib<num_image;++ib) {
+    for(int ib=0;ib<num_image;++ib){
       float *parray=output_boxarray_.cpu()+ib*(32+MAX_IMAGE_BOXES*NUM_BOX_ELEMENT);
       int count=min(MAX_IMAGE_BOXES,(int)*parray);
       BoxArray &output=arrout[ib];
@@ -576,7 +576,7 @@ std::tuple<uint8_t,uint8_t,uint8_t>hsv2bgr(float h,float s,float v){
   return std::make_tuple(static_cast<uint8_t>(b * 255), static_cast<uint8_t>(g * 255),
                     static_cast<uint8_t>(r * 255));
 }
-// 随机颜色画图
+// 随机颜色
 std::tuple<uint8_t, uint8_t, uint8_t> random_color(int id) {
   float h_plane = ((((unsigned int)id << 2) ^ 0x937151) % 100) / 100.0f;
   float s_plane = ((((unsigned int)id << 3) ^ 0x315793) % 100) / 100.0f;
