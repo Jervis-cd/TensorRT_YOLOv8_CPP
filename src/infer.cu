@@ -226,7 +226,7 @@ static std::vector<uint8_t> load_file(const std::string &file){
   size_t length = in.tellg();
 
   std::vector<uint8_t> data;
-  if (length>0){
+  if(length>0){
     in.seekg(0,std::ios::beg);
     data.resize(length);
 

@@ -11,7 +11,7 @@ namespace trt{
 #define INFO(...) trt::__log_func(__FILE__,__LINE__,__VA_ARGS__)
 void __log_func(const char *file,int line,const char *fmt,...);
 
-enum class DType:int{FLOAT=0,HALF=1,INT8=2,INT32=3,BOOL=4,UINT8=5};
+enum class DType:int{ FLOAT=0,HALF=1,INT8=2,INT32=3,BOOL=4,UINT8=5 };
 
 class Timer{
  public:

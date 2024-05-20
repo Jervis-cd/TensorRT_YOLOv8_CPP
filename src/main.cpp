@@ -66,7 +66,7 @@ void batch_inference(std::vector<cv::Mat> images,std::string engine_file){
   }
 }
 
-int main(int argc,char *argv[]){
+int main(int argc,char **argv){
   std::vector<cv::Mat> images{cv::imread("images/car.jpg"),cv::imread("images/zand.jpg")};
   std::string engine_file="yolov8n.transd.engine";
   batch_inference(images,engine_file);
